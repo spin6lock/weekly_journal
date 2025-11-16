@@ -1,0 +1,199 @@
+# -*- coding: utf-8 -*-
+"""
+工作日志总结工具 - 配置文件示例
+
+这是配置文件的模板。使用方法：
+1. 复制此文件为 config.py： cp config.py.example config.py
+2. 修改下面的配置项
+3. 运行工具
+
+注意：不要将 config.py 提交到版本控制系统（已被 .gitignore 忽略）
+"""
+
+# ==============================================================================
+# 核心配置
+# ==============================================================================
+
+# 工作日志根目录路径 - 必须修改为你的实际路径！
+# 示例：
+#   Linux/Mac: "/home/username/worklog" 或 "/Users/username/worklog"
+#   Windows: "C:\\Users\\username\\worklog"
+WORKLOG_PATH = "/path/to/your/worklog"
+
+# 默认统计天数（当没有命令行参数时使用）
+DEFAULT_DAYS = 7
+
+# ==============================================================================
+# 输出目录配置
+# ==============================================================================
+
+# Claude 输入文件输出目录
+CLAUDE_INPUT_DIR = "claude_input"
+
+# 工作总结报告输出目录
+WORKLOG_SUMMARY_DIR = "worklog_summary"
+
+# 是否自动创建输出目录
+AUTO_CREATE_DIRS = True
+
+# ==============================================================================
+# Claude AI 配置
+# ==============================================================================
+
+# Claude 分析提示词文件路径
+CLAUDE_PROMPT_FILE = "claude_analysis_prompt.md"
+
+# 是否默认启用 Claude 分析
+ENABLE_CLAUDE_BY_DEFAULT = True
+
+# ==============================================================================
+# 输出配置
+# ==============================================================================
+
+# 默认输出文件名（支持日期范围变量）
+# 变量：{start_date}, {end_date} 会在运行时替换
+OUTPUT_FILE = "worklog_summary_{start_date}_to_{end_date}.txt"
+
+# Claude 输入文件名模板
+CLAUDE_INPUT_FILE = "claude_input_{start_date}_to_{end_date}.txt"
+
+# 输出格式（支持：txt）
+OUTPUT_FORMAT = "txt"
+
+# ==============================================================================
+# 内容包含选项
+# ==============================================================================
+
+# 是否包含已完成任务
+INCLUDE_COMPLETED = True
+
+# 是否包含未完成任务
+INCLUDE_PENDING = True
+
+# 是否包含日志章节内容
+INCLUDE_SECTIONS = True
+
+# 是否显示每日的详细信息
+SHOW_DAILY_DETAILS = True
+
+# 是否显示任务完成率统计
+SHOW_COMPLETION_RATE = True
+
+# 是否显示任务数量统计
+SHOW_TASK_COUNTS = True
+
+# 是否显示日志天数
+SHOW_LOG_DAYS = True
+
+# 日期格式（Python strftime 格式）
+DATE_FORMAT = "%Y-%m-%d"
+
+# 文件名日期格式（用于生成文件名）
+FILENAME_DATE_FORMAT = "%Y%m%d"
+
+# ==============================================================================
+# 报告模板配置
+# ==============================================================================
+
+# 报告模板配置
+REPORT_TITLE = "工作周报总结分析"
+
+# 统计部分的标题和说明
+STATISTICS_SECTION_TITLE = "📈 整体统计"
+ACHIEVEMENTS_SECTION_TITLE = "⭐ 关键成果与亮点"
+PROBLEMS_SECTION_TITLE = "⚠️ 问题与风险"
+IMPROVEMENTS_SECTION_TITLE = "💡 改进建议"
+NEXT_WEEK_SECTION_TITLE = "📅 下周工作建议"
+
+# 工作分类标签
+WORK_CATEGORIES = [
+    "技术开发类",
+    "配置与资产管理",
+    "测试与联调",
+    "文档与规划",
+    "其他类别"
+]
+
+# 优先级标签
+PRIORITY_LABELS = {
+    "high": "高优先级",
+    "medium": "中优先级",
+    "low": "低优先级"
+}
+
+# ==============================================================================
+# 文件过滤配置
+# ==============================================================================
+
+# 支持的文件模式
+FILE_PATTERNS = ["*.md"]
+
+# 要排除的目录
+EXCLUDE_DIRS = [".git", ".svn", ".trash", ".obsidian", ".cache", "__pycache__"]
+
+# 是否递归搜索子目录
+RECURSIVE_SEARCH = True
+
+# ==============================================================================
+# Claude 集成配置
+# ==============================================================================
+
+# Claude CLI 超时时间（秒）
+CLAUDE_TIMEOUT = 300
+
+# Claude 输出格式
+CLAUDE_OUTPUT_FORMAT = "text"
+
+# 默认提示词（当提示词文件不存在时使用）
+DEFAULT_CLAUDE_PROMPT = """请分析以下工作日志内容，并提供详细的工作总结和建议。
+
+请从以下几个方面对工作日志进行深度分析：
+1. 整体统计与分析
+2. 工作分类与主题
+3. 关键成果与亮点
+4. 问题与风险
+5. 改进建议
+6. 下周工作计划建议
+
+请基于实际日志内容进行客观分析。
+"""
+
+# ==============================================================================
+# 配置验证
+# ==============================================================================
+
+def validate_config():
+    """验证配置是否正确"""
+    import os
+
+    errors = []
+
+    # 验证工作日志路径
+    if WORKLOG_PATH == "/path/to/your/worklog":
+        errors.append("请修改 WORKLOG_PATH 为你的实际工作日志路径")
+
+    if WORKLOG_PATH and not os.path.exists(WORKLOG_PATH):
+        errors.append(f"工作日志路径不存在: {WORKLOG_PATH}")
+
+    # 验证默认天数
+    if not isinstance(DEFAULT_DAYS, int) or DEFAULT_DAYS <= 0:
+        errors.append(f"DEFAULT_DAYS 必须是正整数，当前值：{DEFAULT_DAYS}")
+
+    # 验证文件模式
+    if not isinstance(FILE_PATTERNS, list) or not FILE_PATTERNS:
+        errors.append("FILE_PATTERNS 必须是非空列表")
+
+    # 验证排除目录
+    if not isinstance(EXCLUDE_DIRS, list):
+        errors.append("EXCLUDE_DIRS 必须是列表")
+
+    if errors:
+        print("配置错误：")
+        for error in errors:
+            print(f"  ❌ {error}")
+        return False
+
+    return True
+
+# 如果需要，可以在这里调用验证
+# validate_config()
