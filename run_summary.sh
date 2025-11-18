@@ -58,6 +58,17 @@ if [ $? -eq 0 ]; then
     if [ -n "$LATEST_FILE" ]; then
         echo -e "报告文件：${BLUE}$LATEST_FILE${NC}"
         echo ""
+        # 创建软链接 latest_weekly_journal 指向最新报告
+        SYMLINK_PATH="$SCRIPT_DIR/latest_weekly_journal"
+        # 删除旧的软链接（如果存在）
+        if [ -L "$SYMLINK_PATH" ]; then
+            rm "$SYMLINK_PATH"
+        fi
+        # 创建新的软链接
+        ln -s "$LATEST_FILE" "$SYMLINK_PATH"
+        echo -e "${GREEN}✅ 已创建软链接：${BLUE}$SYMLINK_PATH${NC}"
+        echo -e "   发送端可直接读取：${YELLOW}$SYMLINK_PATH${NC}"
+        echo ""
         echo -e "${YELLOW}是否要打开报告文件？(y/N)${NC}"
         read -r OPEN_FILE
         if [[ "$OPEN_FILE" =~ ^[Yy]$ ]]; then

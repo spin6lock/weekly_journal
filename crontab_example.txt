@@ -1,0 +1,24 @@
+# 工作周报定时生成和推送 - Crontab 配置示例
+# 每周一上午9点自动生成上周工作周报并推送到RocketChat
+
+# 每天早上9点（用于测试，可以修改为合适的时机）
+0 9 * * 1 /home/spin6lock/opensource/weekly_journal/weekly_cron.sh >> /home/spin6lock/opensource/weekly_journal/cron.log 2>&1
+
+# 说明：
+# - 每周一 (1) 上午9点 (9) 执行
+# - >> 将标准输出追加到日志文件
+# - 2>&1 将标准错误也重定向到日志文件
+#
+# 应用配置：
+# 1. 查看当前crontab: crontab -l
+# 2. 编辑crontab: crontab -e
+# 3. 添加上面的行
+#
+# 或者直接将配置加载：
+# crontab /home/spin6lock/opensource/weekly_journal/crontab_example.txt
+#
+# 其他时间示例：
+# 每天早上9点: 0 9 * * *
+# 每周一早上9点: 0 9 * * 1
+# 每两周周一早上9点: 0 9 1,15 * *
+# 每月1号早上9点: 0 9 1 * *
