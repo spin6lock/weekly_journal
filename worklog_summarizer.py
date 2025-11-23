@@ -553,6 +553,33 @@ class WorklogCollector:
 
         return output_file, input_file
 
+    def update_latest_symlink(self, output_file: str) -> bool:
+        """
+        更新latest_weekly_journal软链接指向最新报告
+
+        Args:
+            output_file: 最新的报告文件路径
+
+        Returns:
+            是否成功更新
+        """
+        try:
+            symlink_path = os.path.join(os.path.dirname(__file__), "latest_weekly_journal")
+
+            # 删除旧的软链接（如果存在）
+            if os.path.exists(symlink_path):
+                os.remove(symlink_path)
+
+            # 创建新的软链接（使用相对路径）
+            rel_path = os.path.relpath(output_file, os.path.dirname(__file__))
+            os.symlink(rel_path, symlink_path)
+
+            print(f"🔗 已更新软链接：latest_weekly_journal -> {os.path.basename(output_file)}")
+            return True
+        except Exception as e:
+            print(f"⚠️  更新软链接失败: {e}")
+            return False
+
     def generate_summary_with_claude(self, days: int = 5, use_claude: bool = True,
                                       prompt_file: str = "claude_analysis_prompt.md",
                                       output_file: str = None) -> str:
@@ -612,6 +639,10 @@ class WorklogCollector:
                 f.write(analysis_result)
 
             print(f"📊 详细分析报告已保存到：{output_file}")
+
+            # 自动更新软链接
+            self.update_latest_symlink(output_file)
+
             return analysis_result
         else:
             return log_content
