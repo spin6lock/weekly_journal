@@ -363,9 +363,12 @@ class WorklogCollector:
 """
 
         try:
+            # 读取配置文件获取 CLAUDE_PATH
+            from config import CLAUDE_PATH
+
             # 调用Claude CLI
             result = subprocess.run(
-                ['claude', '-p', '--output-format', 'text', full_prompt],
+                [CLAUDE_PATH, '-p', '--output-format', 'text', full_prompt],
                 capture_output=True,
                 text=True,
                 timeout=300  # 5分钟超时
@@ -659,8 +662,14 @@ def main():
         from config import (
             WORKLOG_PATH, DEFAULT_DAYS, ENABLE_CLAUDE_BY_DEFAULT,
             CLAUDE_PROMPT_FILE, OUTPUT_FILE, CLAUDE_INPUT_FILE,
-            CLAUDE_INPUT_DIR, WORKLOG_SUMMARY_DIR, AUTO_CREATE_DIRS
+            CLAUDE_INPUT_DIR, WORKLOG_SUMMARY_DIR, AUTO_CREATE_DIRS, CLAUDE_PATH
         )
+
+        # 验证 CLAUDE_PATH 是否存在
+        if not os.path.exists(CLAUDE_PATH):
+            print(f"⚠️  警告：CLAUDE_PATH 不存在 - {CLAUDE_PATH}")
+            print("   请检查 config.py 中的 CLAUDE_PATH 配置")
+            print("   获取路径方法：which claude")
 
         # 验证配置
         if WORKLOG_PATH == "/path/to/your/worklog":
