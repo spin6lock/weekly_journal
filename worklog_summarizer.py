@@ -366,12 +366,59 @@ class WorklogCollector:
             # 读取配置文件获取 CLAUDE_PATH
             from config import CLAUDE_PATH
 
+            # 获取 node 的路径，确保 claude 脚本能找到 node
+            # 在 crontab 环境中，PATH 可能不包含 node，所以需要从 CLAUDE_PATH 推断
+            import shutil
+            node_path = None
+            claude_dir = os.path.dirname(CLAUDE_PATH)
+            
+            # 优先尝试从 claude 的目录推断 node 路径（适用于 nvm 安装）
+            # nvm 的 node 通常在 claude 的同一目录下
+            potential_node = os.path.join(claude_dir, 'node')
+            if os.path.exists(potential_node) and os.access(potential_node, os.X_OK):
+                node_path = potential_node
+            else:
+                # 如果同一目录下没有，尝试使用 which（适用于系统安装的 node）
+                node_path = shutil.which('node')
+            
+            # 获取 claude 脚本的实际路径（可能是符号链接）
+            claude_actual = os.path.realpath(CLAUDE_PATH)
+            
+            # 准备环境变量，确保 PATH 包含 node 的路径
+            env = os.environ.copy()
+            if node_path:
+                node_dir = os.path.dirname(node_path)
+                # 将 node 目录添加到 PATH 的最前面，确保优先使用
+                current_path = env.get('PATH', '')
+                if node_dir not in current_path.split(os.pathsep):
+                    env['PATH'] = f"{node_dir}{os.pathsep}{current_path}"
+                    print(f"  🔧 已添加 node 路径到 PATH: {node_dir}")
+                
+                # 直接使用 node 执行 claude 脚本（最可靠，避免 shebang 问题）
+                # claude 通常是符号链接，指向实际的 .js 文件
+                # 例如：/home/user/.nvm/versions/node/v22.17.0/lib/node_modules/@anthropic-ai/claude-code/cli.js
+                if claude_actual.endswith('.js'):
+                    claude_script = claude_actual
+                else:
+                    # 如果不是 .js 文件，使用原始路径（可能是可执行脚本）
+                    claude_script = CLAUDE_PATH
+                
+                # 使用 node 直接执行，完全避免 shebang 和 PATH 问题
+                cmd = [node_path, claude_script, '-p', '--output-format', 'text', full_prompt]
+                print(f"  🔧 使用 node 直接执行 claude 脚本")
+            else:
+                print(f"  ⚠️  警告：无法找到 node，尝试直接调用 claude（可能失败）")
+                print(f"     请确保 node 已安装或配置 CLAUDE_PATH 指向正确的路径")
+                # 如果找不到 node，仍然尝试直接调用（可能会失败，但至少尝试）
+                cmd = [CLAUDE_PATH, '-p', '--output-format', 'text', full_prompt]
+
             # 调用Claude CLI
             result = subprocess.run(
-                [CLAUDE_PATH, '-p', '--output-format', 'text', full_prompt],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5分钟超时
+                timeout=300,  # 5分钟超时
+                env=env  # 传递修改后的环境变量
             )
 
             if result.returncode == 0:
