@@ -8,10 +8,51 @@
 
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+
+
+def resolve_claude_path(claude_path=None) -> str:
+    """动态解析 claude 可执行文件路径。
+
+    优先级：
+    1. 显式指定的绝对路径（如配置文件中手动设置）
+    2. shutil.which("claude") 自动查找
+    3. 常见安装位置兜底
+
+    Raises:
+        FileNotFoundError: 无法找到 claude
+    """
+    if claude_path and os.path.isfile(claude_path):
+        return os.path.realpath(claude_path)
+
+    found = shutil.which("claude")
+    if found:
+        return os.path.realpath(found)
+
+    # 常见安装位置兜底
+    candidates = [
+        os.path.expanduser("~/.local/bin/claude"),
+    ]
+    # 检查 nvm 下是否有（旧版安装方式）
+    nvm_default = os.path.expanduser("~/.nvm/versions/node")
+    if os.path.isdir(nvm_default):
+        for ver in sorted(os.listdir(nvm_default), reverse=True):
+            p = os.path.join(nvm_default, ver, "bin", "claude")
+            if os.path.isfile(p):
+                candidates.append(p)
+            break  # 只看最新版本
+
+    for p in candidates:
+        if os.path.isfile(p):
+            return os.path.realpath(p)
+
+    raise FileNotFoundError(
+        "找不到 claude 命令。请确保已安装 Claude Code CLI，或在 config.py 中设置 CLAUDE_PATH 为绝对路径。"
+    )
 
 
 class WorklogCollector:
@@ -25,6 +66,31 @@ class WorklogCollector:
         self.base_path = Path(base_path)
         self.current_year = datetime.now().year
         self.log_files = []
+
+    @staticmethod
+    def _dedupe_preserve_order(items: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for item in items:
+            key = (item or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
+    @staticmethod
+    def _classify_section_title(title: str) -> str:
+        t = (title or "").strip().lower()
+        if any(k in t for k in ["需求", "开发", "技术", "实现", "功能", "修复", "优化"]):
+            return "技术开发类"
+        if any(k in t for k in ["配置", "资产", "表", "打包", "构建", "发布"]):
+            return "配置与资产管理"
+        if any(k in t for k in ["测试", "联调", "验证", "回归"]):
+            return "测试与联调"
+        if any(k in t for k in ["文档", "规划", "周会", "会议", "总结", "复盘"]):
+            return "文档与规划"
+        return "其他类别"
 
     def parse_date_from_filename(self, filename: str) -> Optional[datetime]:
         """
@@ -193,17 +259,27 @@ class WorklogCollector:
             'pending': []     # 未完成任务
         }
 
+        # 按章节归集任务（更适合本地统计/分类）
+        section_tasks: Dict[str, Dict[str, List[str]]] = {}
+        current_section_title = "未分类"
+
         # 匹配任务项 [-] 或 [x]
         task_pattern = r'^\s*-\s*\[([x ])\]\s*(.+)$'
         for line in content.split('\n'):
+            if line.startswith('##'):
+                current_section_title = line.lstrip('#').strip() or "未分类"
+
             match = re.match(task_pattern, line, re.MULTILINE)
             if match:
                 status, task = match.groups()
                 task = task.strip()
+                section_tasks.setdefault(current_section_title, {'completed': [], 'pending': []})
                 if status.lower() == 'x':
                     tasks['completed'].append(task)
+                    section_tasks[current_section_title]['completed'].append(task)
                 else:
                     tasks['pending'].append(task)
+                    section_tasks[current_section_title]['pending'].append(task)
 
         # 提取引用内容（以> 开头或## 开头的部分）
         sections = []
@@ -233,6 +309,7 @@ class WorklogCollector:
             'date': date_str,
             'file_path': str(file_path),
             'tasks': tasks,
+            'section_tasks': section_tasks,
             'sections': sections,
             'raw_content': content
         }
@@ -307,6 +384,127 @@ class WorklogCollector:
 
         return '\n'.join(claude_input)
 
+    @staticmethod
+    def _extract_log_dates(logs: List[Dict]) -> List[datetime]:
+        dates: List[datetime] = []
+        for log in logs:
+            try:
+                dates.append(datetime.strptime(log.get('date', ''), '%Y-%m-%d'))
+            except Exception:
+                continue
+        return sorted(dates)
+
+    def _compute_stats_range_label(self, days: int) -> str:
+        if days == 5:
+            today = datetime.now()
+            today_weekday = today.weekday()
+
+            if today_weekday in [0, 1, 2, 3]:  # 周一到周四
+                days_since_monday = today_weekday
+                last_monday = today - timedelta(days=days_since_monday + 7)
+            else:  # 周五到周日
+                days_since_monday = today_weekday
+                last_monday = today - timedelta(days=days_since_monday)
+
+            week_end = last_monday + timedelta(days=4)  # 周五
+            return f"工作周：{last_monday.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}"
+
+        return f"过去 {days} 天"
+
+    def generate_local_report_markdown(self, logs: List[Dict], days: int) -> str:
+        stats_range = self._compute_stats_range_label(days)
+        dates = self._extract_log_dates(logs)
+        actual_start = dates[0].strftime("%Y-%m-%d") if dates else "未知"
+        actual_end = dates[-1].strftime("%Y-%m-%d") if dates else "未知"
+
+        completed_all: List[str] = []
+        pending_all: List[str] = []
+        per_day_counts: Dict[str, Dict[str, int]] = {}
+        category_tasks: Dict[str, List[str]] = {}
+
+        for log in logs:
+            day = log.get("date", "未知日期")
+            per_day_counts.setdefault(day, {"completed": 0, "pending": 0})
+
+            completed = (log.get("tasks", {}) or {}).get("completed", []) or []
+            pending = (log.get("tasks", {}) or {}).get("pending", []) or []
+
+            per_day_counts[day]["completed"] += len(completed)
+            per_day_counts[day]["pending"] += len(pending)
+
+            completed_all.extend(completed)
+            pending_all.extend(pending)
+
+            section_tasks = log.get("section_tasks", {}) or {}
+            for section_title, section_task_lists in section_tasks.items():
+                category = self._classify_section_title(section_title)
+                category_tasks.setdefault(category, [])
+                category_tasks[category].extend(section_task_lists.get("completed", []) or [])
+                category_tasks[category].extend(section_task_lists.get("pending", []) or [])
+
+        completed_all = self._dedupe_preserve_order(completed_all)
+        pending_all = self._dedupe_preserve_order(pending_all)
+        completed_set = set(completed_all)
+        pending_all = [t for t in pending_all if t not in completed_set]
+
+        total = len(completed_all) + len(pending_all)
+        completion_rate = (len(completed_all) / total * 100.0) if total else 0.0
+
+        lines: List[str] = []
+        lines.append("# 工作周报总结分析")
+        lines.append("")
+        lines.append("## 📈 整体统计")
+        lines.append(f"- 统计范围：{stats_range}")
+        lines.append(f"- 实际日志日期：{actual_start} 至 {actual_end}")
+        lines.append(f"- 日志天数：{len(logs)} 天")
+        lines.append(f"- 总任务数：{total} 项")
+        lines.append(f"- 已完成：{len(completed_all)} 项")
+        lines.append(f"- 待完成：{len(pending_all)} 项")
+        lines.append(f"- 完成率：{completion_rate:.1f}%")
+        lines.append("")
+
+        lines.append("## 📊 工作分类统计（按日志章节归类）")
+        if category_tasks:
+            for category in ["技术开发类", "配置与资产管理", "测试与联调", "文档与规划", "其他类别"]:
+                if category in category_tasks:
+                    lines.append(f"- {category}：{len(self._dedupe_preserve_order(category_tasks[category]))} 项")
+        else:
+            lines.append("- 无（未识别到章节任务）")
+        lines.append("")
+
+        lines.append("## ✅ 已完成任务（去重）")
+        if completed_all:
+            for i, task in enumerate(completed_all, 1):
+                lines.append(f"{i}. {task}")
+        else:
+            lines.append("无")
+        lines.append("")
+
+        lines.append("## ⏳ 待完成任务（去重）")
+        if pending_all:
+            for i, task in enumerate(pending_all, 1):
+                lines.append(f"{i}. {task}")
+        else:
+            lines.append("无")
+        lines.append("")
+
+        lines.append("## 🗓️ 每日任务计数")
+        for day in sorted(per_day_counts.keys()):
+            c = per_day_counts[day]["completed"]
+            p = per_day_counts[day]["pending"]
+            lines.append(f"- {day}：完成 {c} / 待完成 {p}")
+        lines.append("")
+
+        lines.append("## 📎 日志来源")
+        for log in logs:
+            path = log.get("file_path", "")
+            if path:
+                lines.append(f"- {path}")
+        lines.append("")
+
+        lines.append("> 注：以上内容为本地解析生成（更稳更准确）。如启用 Claude，将在下方追加“Claude补充分析”。")
+        return "\n".join(lines).strip() + "\n"
+
     def save_claude_input(self, days: int = 7, output_file: str = "claude_input.txt"):
         """
         保存收集的日志内容到文件
@@ -363,54 +561,16 @@ class WorklogCollector:
 """
 
         try:
-            # 读取配置文件获取 CLAUDE_PATH
-            from config import CLAUDE_PATH
+            # 动态解析 claude 路径
+            try:
+                from config import CLAUDE_PATH as _configured_path
+            except ImportError:
+                _configured_path = None
 
-            # 获取 node 的路径，确保 claude 脚本能找到 node
-            # 在 crontab 环境中，PATH 可能不包含 node，所以需要从 CLAUDE_PATH 推断
-            import shutil
-            node_path = None
-            claude_dir = os.path.dirname(CLAUDE_PATH)
-            
-            # 优先尝试从 claude 的目录推断 node 路径（适用于 nvm 安装）
-            # nvm 的 node 通常在 claude 的同一目录下
-            potential_node = os.path.join(claude_dir, 'node')
-            if os.path.exists(potential_node) and os.access(potential_node, os.X_OK):
-                node_path = potential_node
-            else:
-                # 如果同一目录下没有，尝试使用 which（适用于系统安装的 node）
-                node_path = shutil.which('node')
-            
-            # 获取 claude 脚本的实际路径（可能是符号链接）
-            claude_actual = os.path.realpath(CLAUDE_PATH)
-            
-            # 准备环境变量，确保 PATH 包含 node 的路径
-            env = os.environ.copy()
-            if node_path:
-                node_dir = os.path.dirname(node_path)
-                # 将 node 目录添加到 PATH 的最前面，确保优先使用
-                current_path = env.get('PATH', '')
-                if node_dir not in current_path.split(os.pathsep):
-                    env['PATH'] = f"{node_dir}{os.pathsep}{current_path}"
-                    print(f"  🔧 已添加 node 路径到 PATH: {node_dir}")
-                
-                # 直接使用 node 执行 claude 脚本（最可靠，避免 shebang 问题）
-                # claude 通常是符号链接，指向实际的 .js 文件
-                # 例如：/home/user/.nvm/versions/node/v22.17.0/lib/node_modules/@anthropic-ai/claude-code/cli.js
-                if claude_actual.endswith('.js'):
-                    claude_script = claude_actual
-                else:
-                    # 如果不是 .js 文件，使用原始路径（可能是可执行脚本）
-                    claude_script = CLAUDE_PATH
-                
-                # 使用 node 直接执行，完全避免 shebang 和 PATH 问题
-                cmd = [node_path, claude_script, '-p', '--output-format', 'text', full_prompt]
-                print(f"  🔧 使用 node 直接执行 claude 脚本")
-            else:
-                print(f"  ⚠️  警告：无法找到 node，尝试直接调用 claude（可能失败）")
-                print(f"     请确保 node 已安装或配置 CLAUDE_PATH 指向正确的路径")
-                # 如果找不到 node，仍然尝试直接调用（可能会失败，但至少尝试）
-                cmd = [CLAUDE_PATH, '-p', '--output-format', 'text', full_prompt]
+            claude_bin = resolve_claude_path(_configured_path)
+            print(f"  🔧 使用 claude: {claude_bin}")
+
+            cmd = [claude_bin, '-p', '--output-format', 'text', full_prompt]
 
             # 调用Claude CLI
             result = subprocess.run(
@@ -418,7 +578,6 @@ class WorklogCollector:
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5分钟超时
-                env=env  # 传递修改后的环境变量
             )
 
             if result.returncode == 0:
@@ -564,8 +723,15 @@ class WorklogCollector:
 7. **精简分析**：无需详细列出每日工作内容，重点关注统计和分类
 """
 
+    @staticmethod
+    def _resolve_output_path(base_dir: Path, maybe_relative: str) -> Path:
+        p = Path(maybe_relative)
+        if p.is_absolute():
+            return p
+        return base_dir / p
+
     def generate_output_filename(self, days: int = 5, claude_input_dir: str = "claude_input",
-                                  worklog_summary_dir: str = "worklog_summary") -> tuple:
+                                  worklog_summary_dir: str = "worklog_summary") -> Tuple[str, str]:
         """
         根据天数和日期范围生成输出文件名
 
@@ -577,6 +743,10 @@ class WorklogCollector:
         Returns:
             tuple: (输出文件名, 输入文件名)
         """
+        base_dir = Path(__file__).resolve().parent
+        resolved_input_dir = self._resolve_output_path(base_dir, claude_input_dir)
+        resolved_summary_dir = self._resolve_output_path(base_dir, worklog_summary_dir)
+
         if days == 5:
             # 计算工作周范围
             today = datetime.now()
@@ -592,16 +762,16 @@ class WorklogCollector:
             week_end = last_monday + timedelta(days=4)  # 周五
 
             # 生成文件名：worklog_summary_YYYYMMDD_to_YYYYMMDD.txt
-            output_file = f"{worklog_summary_dir}/worklog_summary_{last_monday.strftime('%Y%m%d')}_to_{week_end.strftime('%Y%m%d')}.txt"
-            input_file = f"{claude_input_dir}/claude_input_{last_monday.strftime('%Y%m%d')}_to_{week_end.strftime('%Y%m%d')}.txt"
+            output_file = resolved_summary_dir / f"worklog_summary_{last_monday.strftime('%Y%m%d')}_to_{week_end.strftime('%Y%m%d')}.txt"
+            input_file = resolved_input_dir / f"claude_input_{last_monday.strftime('%Y%m%d')}_to_{week_end.strftime('%Y%m%d')}.txt"
         else:
             # 对于非5天的情况，使用日期范围
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
-            output_file = f"{worklog_summary_dir}/worklog_summary_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.txt"
-            input_file = f"{claude_input_dir}/claude_input_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.txt"
+            output_file = resolved_summary_dir / f"worklog_summary_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.txt"
+            input_file = resolved_input_dir / f"claude_input_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.txt"
 
-        return output_file, input_file
+        return str(output_file), str(input_file)
 
     def update_latest_symlink(self, output_file: str) -> bool:
         """
@@ -664,8 +834,8 @@ class WorklogCollector:
             except Exception as e:
                 print(f"  ⚠️  解析文件失败 {log_file}: {e}")
 
-        # 收集原始内容（保存到文件）
-        log_content = self.collect_logs_for_claude(days)
+        local_report = self.generate_local_report_markdown(logs, days)
+        raw_log_content = self.collect_logs_for_claude(days)
 
         # 自动生成文件名或使用提供的文件名
         if output_file is None:
@@ -674,15 +844,37 @@ class WorklogCollector:
             # 如果提供了output_file，也生成对应的input_file
             _, claude_input_file = self.generate_output_filename(days)
 
-        # 保存原始日志
+        # 保存分析输入（包含本地统计 + 原始日志，方便追溯/复现）
         with open(claude_input_file, 'w', encoding='utf-8') as f:
-            f.write(log_content)
-        print(f"📄 原始日志内容已保存到：{claude_input_file}")
+            f.write(local_report)
+            f.write("\n\n")
+            f.write("=" * 80 + "\n")
+            f.write("原始日志内容（用于追溯）\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(raw_log_content)
+        print(f"📄 分析输入内容已保存到：{claude_input_file}")
 
         # 调用Claude分析
         if use_claude:
             print("")
-            analysis_result = self.call_claude_analysis(log_content, prompt_file)
+            claude_input = (
+                f"{local_report}\n\n"
+                f"{'=' * 80}\n"
+                f"原始日志内容（用于提炼亮点/风险/建议）：\n"
+                f"{'=' * 80}\n\n"
+                f"{raw_log_content}\n"
+            )
+
+            claude_result = self.call_claude_analysis(claude_input, prompt_file).strip()
+            if not claude_result:
+                analysis_result = local_report
+            else:
+                analysis_result = (
+                    local_report
+                    + "\n\n## 🤖 Claude补充分析\n\n"
+                    + claude_result
+                    + ("\n" if not claude_result.endswith("\n") else "")
+                )
 
             # 保存分析结果
             with open(output_file, 'w', encoding='utf-8') as f:
@@ -695,7 +887,12 @@ class WorklogCollector:
 
             return analysis_result
         else:
-            return log_content
+            # 不调用Claude时也输出一份稳定的本地统计报告
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(local_report)
+            print(f"📊 本地统计报告已保存到：{output_file}")
+            self.update_latest_symlink(output_file)
+            return local_report
 
 
 def main():
@@ -712,11 +909,13 @@ def main():
             CLAUDE_INPUT_DIR, WORKLOG_SUMMARY_DIR, AUTO_CREATE_DIRS, CLAUDE_PATH
         )
 
-        # 验证 CLAUDE_PATH 是否存在
-        if not os.path.exists(CLAUDE_PATH):
-            print(f"⚠️  警告：CLAUDE_PATH 不存在 - {CLAUDE_PATH}")
-            print("   请检查 config.py 中的 CLAUDE_PATH 配置")
-            print("   获取路径方法：which claude")
+        # 验证 claude 是否可用
+        try:
+            claude_bin = resolve_claude_path(CLAUDE_PATH)
+            print(f"✅ 找到 claude: {claude_bin}")
+        except FileNotFoundError as e:
+            print(f"⚠️  警告：{e}")
+            use_claude = False
 
         # 验证配置
         if WORKLOG_PATH == "/path/to/your/worklog":
@@ -732,8 +931,16 @@ def main():
 
         # 创建输出目录
         if AUTO_CREATE_DIRS:
-            os.makedirs(CLAUDE_INPUT_DIR, exist_ok=True)
-            os.makedirs(WORKLOG_SUMMARY_DIR, exist_ok=True)
+            base_dir = Path(__file__).resolve().parent
+            claude_input_dir_path = Path(CLAUDE_INPUT_DIR)
+            worklog_summary_dir_path = Path(WORKLOG_SUMMARY_DIR)
+            if not claude_input_dir_path.is_absolute():
+                claude_input_dir_path = base_dir / claude_input_dir_path
+            if not worklog_summary_dir_path.is_absolute():
+                worklog_summary_dir_path = base_dir / worklog_summary_dir_path
+
+            os.makedirs(claude_input_dir_path, exist_ok=True)
+            os.makedirs(worklog_summary_dir_path, exist_ok=True)
 
     except ImportError:
         print("❌ 错误：找不到 config.py 配置文件")
@@ -814,23 +1021,22 @@ def main():
         print(f"   2. 分析报告：{output_file}")
         print("")
     else:
-        # 仅收集日志，不调用Claude
-        print(f"🔍 正在收集过去 {days} 天的工作日志...")
-        log_content = collector.collect_logs_for_claude(days)
+        # 不调用Claude：生成稳定的本地统计报告 + 保存原始日志输入
+        collector.generate_summary_with_claude(
+            days=days,
+            use_claude=False,
+            prompt_file=CLAUDE_PROMPT_FILE,
+            output_file=output_file
+        )
 
-        # 保存原始日志
-        with open(input_file, 'w', encoding='utf-8') as f:
-            f.write(log_content)
-
-        print(f"📄 原始日志内容已保存到：{input_file}")
         print("")
         print("=" * 80)
-        print("✅ 收集完成！")
+        print("✅ 生成完成！")
         print("")
         print("💡 使用方法：")
-        print(f"   1. 查看日志内容：cat {input_file}")
-        print(f"   2. 将文件内容复制并发送给Claude进行深度分析")
-        print("   3. 或运行：python3 worklog_summarizer.py {days}  # 启用Claude分析")
+        print(f"   1. 查看分析输入：cat {input_file}")
+        print(f"   2. 查看本地统计报告：cat {output_file}")
+        print("   3. 或运行：python3 worklog_summarizer.py {days}  # 启用Claude补充分析")
         print("")
 
 
